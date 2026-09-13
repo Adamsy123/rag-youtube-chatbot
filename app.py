@@ -5,6 +5,7 @@ import pathlib
 import streamlit as st
 from dotenv import load_dotenv
 import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 # Load environment variables (Local .env & Streamlit Cloud Secrets)
 load_dotenv()
@@ -13,7 +14,7 @@ if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 # LangChain Imports
-from langchain_community.document_loaders import YoutubeLoader
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
@@ -41,14 +42,10 @@ with st.sidebar:
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 
-def extract_clean_url(url: str) -> str:
-    """Extracts a valid YouTube URL string, supporting standard links and Shorts."""
-    url = url.strip()
-    match = re.search(r"(?:v=|\/shorts\/|\/)([0-9A-Za-z_-]{11})", url)
-    if match:
-        video_id = match.group(1)
-        return f"https://www.youtube.com/watch?v={video_id}"
-    return url
+def extract_video_id(url: str) -> str:
+    """Extracts 11-character YouTube video ID."""
+    match = re.search(r"(?:v=|\/shorts\/|\/)([0-9A-Za-z_-]{11})", url.strip())
+    return match.group(1) if match else None
 
 # Video URL Input
 youtube_input = st.text_input("Enter YouTube Video URL:", placeholder="https://www.youtube.com/watch?v=...")
@@ -64,86 +61,73 @@ with col2:
         resolution = "Audio Only"
 
 if st.button("Process & Prepare"):
-    clean_url = extract_clean_url(youtube_input)
+    video_id = extract_video_id(youtube_input)
+    clean_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else None
     
-    if not clean_url or not re.search(r"[0-9A-Za-z_-]{11}", clean_url):
+    if not video_id:
         st.error("Please enter a valid YouTube video URL containing an 11-character video ID.")
     elif not os.getenv("OPENAI_API_KEY"):
         st.error("Please provide an OpenAI API Key.")
     else:
         st.session_state.vector_store = None
 
-        # 1. Download & Local Storage Handling
-        with st.spinner("Downloading and processing media..."):
+        # 1. Download Handling
+        with st.spinner("Downloading media..."):
             try:
                 temp_dir = tempfile.mkdtemp()
                 output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
 
-                common_opts = {
+                ydl_opts = {
                     'outtmpl': output_template,
                     'quiet': True,
                     'no_warnings': True,
-                    'nocheckcertificate': True,
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'format': 'bestvideo+bestaudio/best' if download_format == "Video (MP4)" else 'bestaudio/best',
+                    'ignoreerrors': True,
                 }
 
                 if download_format == "Audio (MP3)":
-                    ydl_opts = {
-                        **common_opts,
-                        'format': 'bestaudio/best',
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                    }
-                    mime_type = "audio/mp3"
-                else:
-                    # Select progressive formats first for single-file downloading reliability on cloud hostings
-                    ydl_opts = {
-                        **common_opts,
-                        'format': 'b/best', 
-                    }
-                    mime_type = "video/mp4"
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(clean_url, download=True)
-                    downloaded_filename = ydl.prepare_filename(info)
                     
-                    if download_format == "Audio (MP3)":
-                        downloaded_filename = os.path.splitext(downloaded_filename)[0] + ".mp3"
+                downloaded_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if not f.endswith('.part')]
+                
+                if downloaded_files:
+                    final_buffer_path = downloaded_files[0]
+                    file_name = os.path.basename(final_buffer_path)
+                    mime_type = "audio/mp3" if download_format == "Audio (MP3)" else "video/mp4"
 
-                if not os.path.exists(downloaded_filename) or os.path.getsize(downloaded_filename) == 0:
-                    raise FileNotFoundError("Stream downloading timed out or returned empty.")
-
-                file_name = os.path.basename(downloaded_filename)
-
-                with open(downloaded_filename, "rb") as file_bytes:
-                    st.download_button(
-                        label=f"💾 Download {file_name} via Browser",
-                        data=file_bytes,
-                        file_name=file_name,
-                        mime=mime_type,
-                        key="browser_download"
-                    )
-                st.success("Media downloaded successfully!")
+                    with open(final_buffer_path, "rb") as file_bytes:
+                        st.download_button(
+                            label=f"💾 Save {file_name} via Browser",
+                            data=file_bytes,
+                            file_name=file_name,
+                            mime=mime_type,
+                            key="browser_download"
+                        )
+                    st.success("Media prepared for browser download!")
+                else:
+                    st.warning("⚠️ YouTube limited media download for this video on cloud servers.")
 
             except Exception as download_error:
                 st.warning(f"Download warning: {str(download_error)}")
 
-        # 2. RAG Pipeline Processing
-        with st.spinner("Extracting transcript and building vector store..."):
+        # 2. Direct Transcript Extraction & RAG Pipeline
+        with st.spinner("Extracting transcript and indexing..."):
             try:
-                loader = YoutubeLoader.from_youtube_url(
-                    clean_url, 
-                    add_video_info=False,
-                    language=["en", "en-US", "en-GB"]
-                )
-                docs = loader.load()
+                # Fetch transcript directly via YoutubeTranscriptApi
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US', 'a.en'])
+                full_text = " ".join([item['text'] for item in transcript_list])
 
-                if not docs or not docs[0].page_content.strip():
-                    st.warning("⚠️ No transcript/captions found for this video. The chat feature requires videos with subtitles.")
+                if not full_text.strip():
+                    st.warning("⚠️ Transcript is empty.")
                 else:
+                    docs = [Document(page_content=full_text, metadata={"source": clean_url})]
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                     chunks = text_splitter.split_documents(docs)
 
@@ -153,8 +137,10 @@ if st.button("Process & Prepare"):
                     st.session_state.vector_store = vector_store
                     st.success("Video indexed successfully! Ask your questions below.")
 
+            except (TranscriptsDisabled, NoTranscriptFound):
+                st.warning("⚠️ Captions/Subtitles are not enabled for this video.")
             except Exception as transcript_error:
-                st.warning("⚠️ Could not load transcript. YouTube might be limiting automatic caption requests on cloud servers for this video.")
+                st.warning("⚠️ Could not load transcript due to cloud IP limitations.")
 
 # 3. Interactive Chat Interface
 if st.session_state.vector_store is not None:
