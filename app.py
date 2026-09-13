@@ -13,6 +13,13 @@ load_dotenv()
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
+# Handle YouTube Cookies dynamically from Streamlit Secrets
+COOKIE_PATH = None
+if "YOUTUBE_COOKIES" in st.secrets and st.secrets["YOUTUBE_COOKIES"].strip():
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        f.write(st.secrets["YOUTUBE_COOKIES"])
+        COOKIE_PATH = f.name
+
 # LangChain Imports
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -43,7 +50,7 @@ if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 
 def extract_video_id(url: str) -> str:
-    """Extracts 11-character YouTube video ID."""
+    """Extracts 11-character YouTube video ID supporting standard links and Shorts."""
     match = re.search(r"(?:v=|\/shorts\/|\/)([0-9A-Za-z_-]{11})", url.strip())
     return match.group(1) if match else None
 
@@ -71,7 +78,7 @@ if st.button("Process & Prepare"):
     else:
         st.session_state.vector_store = None
 
-        # 1. Download Handling
+        # 1. Download Handling via yt-dlp
         with st.spinner("Downloading media..."):
             try:
                 temp_dir = tempfile.mkdtemp()
@@ -84,6 +91,10 @@ if st.button("Process & Prepare"):
                     'format': 'bestvideo+bestaudio/best' if download_format == "Video (MP4)" else 'bestaudio/best',
                     'ignoreerrors': True,
                 }
+
+                # Attach runtime cookie file if available
+                if COOKIE_PATH:
+                    ydl_opts['cookiefile'] = COOKIE_PATH
 
                 if download_format == "Audio (MP3)":
                     ydl_opts['postprocessors'] = [{
@@ -112,7 +123,7 @@ if st.button("Process & Prepare"):
                         )
                     st.success("Media prepared for browser download!")
                 else:
-                    st.warning("⚠️ YouTube limited media download for this video on cloud servers.")
+                    st.warning("⚠️ Could not retrieve media stream. Verify your YOUTUBE_COOKIES configuration in Streamlit Secrets.")
 
             except Exception as download_error:
                 st.warning(f"Download warning: {str(download_error)}")
@@ -120,8 +131,19 @@ if st.button("Process & Prepare"):
         # 2. Direct Transcript Extraction & RAG Pipeline
         with st.spinner("Extracting transcript and indexing..."):
             try:
-                # Fetch transcript directly via YoutubeTranscriptApi
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US', 'a.en'])
+                # Fetch transcript directly using YouTubeTranscriptApi
+                if COOKIE_PATH:
+                    transcript_list = YouTubeTranscriptApi.get_transcript(
+                        video_id, 
+                        languages=['en', 'en-US', 'a.en'],
+                        cookies=COOKIE_PATH
+                    )
+                else:
+                    transcript_list = YouTubeTranscriptApi.get_transcript(
+                        video_id, 
+                        languages=['en', 'en-US', 'a.en']
+                    )
+
                 full_text = " ".join([item['text'] for item in transcript_list])
 
                 if not full_text.strip():
@@ -140,7 +162,7 @@ if st.button("Process & Prepare"):
             except (TranscriptsDisabled, NoTranscriptFound):
                 st.warning("⚠️ Captions/Subtitles are not enabled for this video.")
             except Exception as transcript_error:
-                st.warning("⚠️ Could not load transcript due to cloud IP limitations.")
+                st.warning(f"⚠️ Could not load transcript: {str(transcript_error)}")
 
 # 3. Interactive Chat Interface
 if st.session_state.vector_store is not None:
