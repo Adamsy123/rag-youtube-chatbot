@@ -8,6 +8,12 @@ import streamlit as st
 from dotenv import load_dotenv
 from pytubefix import YouTube
 
+# Load environment variables (Local .env & Streamlit Cloud Secrets)
+load_dotenv()
+
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+
 # LangChain Imports
 from langchain_community.document_loaders import YoutubeLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -16,12 +22,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_classic.chains.retrieval import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
-
-# Load environment variables (Local .env & Streamlit Cloud Secrets)
-load_dotenv()
-
-if "OPENAI_API_KEY" in st.secrets:
-    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="RAG YouTube Chatbot", page_icon="🎥", layout="wide")
 st.title("🎥🤖 RAG YouTube Chatbot + Media Downloader")
@@ -44,9 +44,9 @@ if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 
 def extract_clean_url(url: str) -> str:
-    """Extracts a valid YouTube URL string free of extra tracking parameters."""
+    """Extracts a valid YouTube URL string, supporting standard links and Shorts."""
     url = url.strip()
-    match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url)
+    match = re.search(r"(?:v=|\/shorts\/|\/)([0-9A-Za-z_-]{11})", url)
     if match:
         video_id = match.group(1)
         return f"https://www.youtube.com/watch?v={video_id}"
@@ -78,7 +78,8 @@ if st.button("Process & Prepare"):
         # 1. Download & Local Storage Handling
         with st.spinner("Downloading and processing media..."):
             try:
-                yt = YouTube(clean_url)
+                # client='ANDROID' bypasses 403 Forbidden errors on Streamlit Cloud
+                yt = YouTube(clean_url, client='ANDROID')
                 downloads_folder = str(pathlib.Path.home() / "Downloads")
                 temp_dir = tempfile.mkdtemp()
 
@@ -111,11 +112,9 @@ if st.button("Process & Prepare"):
                         stream = yt.streams.filter(progressive=True, file_extension='mp4', res="360p").first()
 
                     if stream:
-                        # Direct combined file available
                         local_path = stream.download(output_path=downloads_folder)
                         final_buffer_path = stream.download(output_path=temp_dir)
                     else:
-                        # Combine high quality video + audio using FFmpeg executable
                         ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
                         video_stream = yt.streams.filter(adaptive=True, file_extension='mp4', only_video=True).order_by('resolution').desc().first()
@@ -132,7 +131,6 @@ if st.button("Process & Prepare"):
                         local_path = os.path.join(downloads_folder, merged_filename)
                         final_buffer_path = os.path.join(temp_dir, merged_filename)
 
-                        # FFmpeg command to quickly mux video + audio without re-encoding
                         cmd = [
                             ffmpeg_path, "-y",
                             "-i", v_temp,
@@ -143,7 +141,6 @@ if st.button("Process & Prepare"):
                         ]
                         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-                        # Copy merged file to Downloads folder
                         import shutil
                         shutil.copyfile(final_buffer_path, local_path)
 
