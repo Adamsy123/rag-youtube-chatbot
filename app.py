@@ -17,8 +17,11 @@ from langchain_classic.chains.retrieval import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 
-# Load environment variables
+# Load environment variables (Local .env & Streamlit Cloud Secrets)
 load_dotenv()
+
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="RAG YouTube Chatbot", page_icon="🎥", layout="wide")
 st.title("🎥🤖 RAG YouTube Chatbot + Media Downloader")
