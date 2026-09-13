@@ -2,11 +2,9 @@ import os
 import re
 import tempfile
 import pathlib
-import subprocess
-import imageio_ffmpeg
 import streamlit as st
 from dotenv import load_dotenv
-from pytubefix import YouTube
+import yt_dlp
 
 # Load environment variables (Local .env & Streamlit Cloud Secrets)
 load_dotenv()
@@ -76,81 +74,62 @@ if st.button("Process & Prepare"):
         st.session_state.vector_store = None
 
         # 1. Download & Local Storage Handling
-        with st.spinner("Downloading and processing media..."):
+        with st.spinner("Downloading and processing media with yt-dlp..."):
             try:
-                # client='ANDROID' bypasses 403 Forbidden errors on Streamlit Cloud
-                yt = YouTube(clean_url, client='ANDROID')
-                downloads_folder = str(pathlib.Path.home() / "Downloads")
                 temp_dir = tempfile.mkdtemp()
+                downloads_folder = str(pathlib.Path.home() / "Downloads")
 
                 if download_format == "Audio (MP3)":
-                    stream = yt.streams.get_audio_only() or yt.streams.filter(only_audio=True).first()
-                    if not stream:
-                        raise ValueError("No audio stream found.")
-                        
-                    local_path = stream.download(output_path=downloads_folder)
-                    base, _ = os.path.splitext(local_path)
-                    mp3_local_path = base + ".mp3"
-                    if os.path.exists(local_path) and not local_path.endswith(".mp3"):
-                        os.rename(local_path, mp3_local_path)
-                    
-                    temp_path = stream.download(output_path=temp_dir)
-                    base_temp, _ = os.path.splitext(temp_path)
-                    final_buffer_path = base_temp + ".mp3"
-                    if os.path.exists(temp_path) and not temp_path.endswith(".mp3"):
-                        os.rename(temp_path, final_buffer_path)
-                    
+                    ydl_opts = {
+                        'format': 'bestaudio/best',
+                        'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }],
+                        'quiet': True,
+                    }
                     mime_type = "audio/mp3"
-                    file_name = f"{yt.title}.mp3"
-                    st.info(f"🎵 Audio saved to: `{mp3_local_path}`")
-
                 else:
-                    stream = None
+                    format_str = 'bestvideo+bestaudio/best'
                     if resolution == "720p":
-                        stream = yt.streams.filter(progressive=True, file_extension='mp4', res="720p").first()
+                        format_str = 'bestvideo[height<=720]+bestaudio/best'
                     elif resolution == "360p":
-                        stream = yt.streams.filter(progressive=True, file_extension='mp4', res="360p").first()
+                        format_str = 'bestvideo[height<=360]+bestaudio/best'
 
-                    if stream:
-                        local_path = stream.download(output_path=downloads_folder)
-                        final_buffer_path = stream.download(output_path=temp_dir)
-                    else:
-                        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-
-                        video_stream = yt.streams.filter(adaptive=True, file_extension='mp4', only_video=True).order_by('resolution').desc().first()
-                        audio_stream = yt.streams.get_audio_only()
-
-                        if not video_stream or not audio_stream:
-                            raise ValueError("Could not extract video/audio streams.")
-
-                        v_temp = video_stream.download(output_path=temp_dir, filename_prefix="v_")
-                        a_temp = audio_stream.download(output_path=temp_dir, filename_prefix="a_")
-
-                        clean_title = "".join(c for c in yt.title if c.isalnum() or c in (" ", "_", "-")).rstrip()
-                        merged_filename = f"{clean_title}.mp4"
-                        local_path = os.path.join(downloads_folder, merged_filename)
-                        final_buffer_path = os.path.join(temp_dir, merged_filename)
-
-                        cmd = [
-                            ffmpeg_path, "-y",
-                            "-i", v_temp,
-                            "-i", a_temp,
-                            "-c:v", "copy",
-                            "-c:a", "aac",
-                            final_buffer_path
-                        ]
-                        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-                        import shutil
-                        shutil.copyfile(final_buffer_path, local_path)
-
+                    ydl_opts = {
+                        'format': format_str,
+                        'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                        'merge_output_format': 'mp4',
+                        'quiet': True,
+                    }
                     mime_type = "video/mp4"
-                    file_name = f"{yt.title}.mp4"
-                    st.info(f"🎥 Video (with audio) saved to: `{local_path}`")
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(clean_url, download=True)
+                    video_title = info.get('title', 'media_file')
+                    
+                # Find the downloaded file in the temporary directory
+                downloaded_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
+                if not downloaded_files:
+                    raise FileNotFoundError("Downloaded file was not created.")
+                
+                final_buffer_path = downloaded_files[0]
+                file_name = os.path.basename(final_buffer_path)
+
+                # Save copy to system Downloads folder if write permissions exist
+                try:
+                    local_path = os.path.join(downloads_folder, file_name)
+                    import shutil
+                    shutil.copyfile(final_buffer_path, local_path)
+                    st.info(f"💾 File saved to server downloads: `{local_path}`")
+                except Exception:
+                    pass
 
                 with open(final_buffer_path, "rb") as file_bytes:
                     st.download_button(
-                        label=f"💾 Save {file_name} via Browser",
+                        label=f"💾 Download {file_name} via Browser",
                         data=file_bytes,
                         file_name=file_name,
                         mime=mime_type,
