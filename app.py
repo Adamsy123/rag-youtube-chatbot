@@ -77,18 +77,14 @@ if st.button("Process & Prepare"):
         with st.spinner("Downloading and processing media..."):
             try:
                 temp_dir = tempfile.mkdtemp()
+                output_template = os.path.join(temp_dir, "%(title)s.%(ext)s")
 
-                # Robust yt-dlp config to bypass cloud IP blocks
                 common_opts = {
-                    'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                    'outtmpl': output_template,
                     'quiet': True,
                     'no_warnings': True,
                     'nocheckcertificate': True,
-                    'extractor_args': {
-                        'youtube': {
-                            'player_client': ['mweb', 'android'],
-                        }
-                    }
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 }
 
                 if download_format == "Audio (MP3)":
@@ -103,31 +99,26 @@ if st.button("Process & Prepare"):
                     }
                     mime_type = "audio/mp3"
                 else:
-                    format_str = 'best'
-                    if resolution == "720p":
-                        format_str = 'bestvideo[height<=720]+bestaudio/best/best'
-                    elif resolution == "360p":
-                        format_str = 'bestvideo[height<=360]+bestaudio/best/best'
-
+                    # Select progressive formats first for single-file downloading reliability on cloud hostings
                     ydl_opts = {
                         **common_opts,
-                        'format': format_str,
-                        'merge_output_format': 'mp4',
+                        'format': 'b/best', 
                     }
                     mime_type = "video/mp4"
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(clean_url, download=True)
-                    video_title = info.get('title', 'media_file')
+                    downloaded_filename = ydl.prepare_filename(info)
                     
-                downloaded_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if not f.endswith('.part')]
-                if not downloaded_files:
-                    raise FileNotFoundError("Stream extraction failed. Please try another link.")
-                
-                final_buffer_path = downloaded_files[0]
-                file_name = os.path.basename(final_buffer_path)
+                    if download_format == "Audio (MP3)":
+                        downloaded_filename = os.path.splitext(downloaded_filename)[0] + ".mp3"
 
-                with open(final_buffer_path, "rb") as file_bytes:
+                if not os.path.exists(downloaded_filename) or os.path.getsize(downloaded_filename) == 0:
+                    raise FileNotFoundError("Stream downloading timed out or returned empty.")
+
+                file_name = os.path.basename(downloaded_filename)
+
+                with open(downloaded_filename, "rb") as file_bytes:
                     st.download_button(
                         label=f"💾 Download {file_name} via Browser",
                         data=file_bytes,
@@ -135,6 +126,7 @@ if st.button("Process & Prepare"):
                         mime=mime_type,
                         key="browser_download"
                     )
+                st.success("Media downloaded successfully!")
 
             except Exception as download_error:
                 st.warning(f"Download warning: {str(download_error)}")
@@ -142,7 +134,11 @@ if st.button("Process & Prepare"):
         # 2. RAG Pipeline Processing
         with st.spinner("Extracting transcript and building vector store..."):
             try:
-                loader = YoutubeLoader.from_youtube_url(clean_url, add_video_info=False)
+                loader = YoutubeLoader.from_youtube_url(
+                    clean_url, 
+                    add_video_info=False,
+                    language=["en", "en-US", "en-GB"]
+                )
                 docs = loader.load()
 
                 if not docs or not docs[0].page_content.strip():
@@ -158,7 +154,7 @@ if st.button("Process & Prepare"):
                     st.success("Video indexed successfully! Ask your questions below.")
 
             except Exception as transcript_error:
-                st.warning("⚠️ Could not load transcript. The video may not have closed captions enabled.")
+                st.warning("⚠️ Could not load transcript. YouTube might be limiting automatic caption requests on cloud servers for this video.")
 
 # 3. Interactive Chat Interface
 if st.session_state.vector_store is not None:
