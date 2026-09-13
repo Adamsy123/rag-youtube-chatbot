@@ -1,0 +1,9 @@
+streamlit
+pytubefix
+imageio-ffmpeg
+python-dotenv
+langchain
+langchain-openai
+langchain-community
+langchain-text-splitters
+faiss-cpu

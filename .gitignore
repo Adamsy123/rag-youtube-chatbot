@@ -1,0 +1,19 @@
+# Environment Variables & Keys
+.env
+
+# Python Cache & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# Temp files and local downloads
+*.mp3
+*.mp4
+tmp/
+
+# OS specific files
+.DS_Store
+Thumbs.db
